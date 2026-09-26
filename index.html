@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MyScreenStudio</title>
+  <meta name="description" content="Free, open-source screen recorder that turns short clips into polished videos — backgrounds, rounded corners, shadows, smooth zooms and MP4 export. Runs 100% in your browser." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237F5AF0'/%3E%3Cstop offset='1' stop-color='%232CB1BC'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Ccircle cx='16' cy='16' r='6' fill='white'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <span>MyScreenStudio</span>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn ghost" id="btnNew" hidden>
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor"/></svg>
+        New recording
+      </button>
+      <label class="btn ghost" id="btnImportTop" hidden>
+        <svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14" /></svg>
+        Import
+        <input type="file" accept="video/*" class="file-input" />
+      </label>
+      <button class="btn primary" id="btnExport" disabled>
+        <svg viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
+        Export MP4
+      </button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <!-- Stage -->
+    <section class="stage" id="stage">
+      <div class="empty" id="emptyState">
+        <div class="empty-card">
+          <div class="empty-icon" aria-hidden="true"></div>
+          <h1>Make beautiful screen videos</h1>
+          <p>Record up to <strong>10 seconds</strong> of your screen, add a background, rounded corners and smooth zooms, then export an MP4.</p>
+          <div class="empty-actions">
+            <button class="btn primary lg" id="btnRecord">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor"/></svg>
+              Record screen
+            </button>
+            <label class="btn ghost lg">
+              Import video
+              <input type="file" accept="video/*" class="file-input" />
+            </label>
+          </div>
+          <p class="hint">…or drop a video file anywhere. Everything stays on your device.</p>
+          <p class="warn" id="compatWarn" hidden></p>
+        </div>
+      </div>
+
+      <div class="canvas-wrap" id="canvasWrap" hidden>
+        <canvas id="preview"></canvas>
+      </div>
+
+      <div class="rec-pill" id="recPill" hidden>
+        <span class="rec-dot"></span>
+        <span id="recTime">0.0s</span>
+        <span class="rec-max">/ 10s</span>
+        <div class="rec-bar"><div id="recBar"></div></div>
+        <button class="btn danger sm" id="btnStop">Stop</button>
+      </div>
+
+      <div class="drop-overlay" id="dropOverlay" hidden><span>Drop your video</span></div>
+    </section>
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar" aria-label="Settings">
+      <section class="panel">
+        <h2>Background</h2>
+        <div class="swatches" id="gradientSwatches"></div>
+        <div class="row gap">
+          <label class="swatch-btn" title="Solid color">
+            <input type="color" id="solidColor" value="#111827" />
+            <span>Solid</span>
+          </label>
+          <label class="swatch-btn" title="Upload an image">
+            <input type="file" accept="image/*" id="bgImage" class="file-input" />
+            <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 16 5-5 4 4 3-3 6 6"/></svg>
+            <span>Image</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Frame</h2>
+        <div class="field">
+          <label for="padding">Padding <output id="paddingOut"></output></label>
+          <input type="range" id="padding" min="0" max="0.25" step="0.005" />
+        </div>
+        <div class="field">
+          <label for="radius">Roundness <output id="radiusOut"></output></label>
+          <input type="range" id="radius" min="0" max="48" step="1" />
+        </div>
+        <div class="field">
+          <label for="shadow">Shadow <output id="shadowOut"></output></label>
+          <input type="range" id="shadow" min="0" max="1" step="0.01" />
+        </div>
+        <div class="field">
+          <label>Window</label>
+          <div class="seg" id="chromeSeg">
+            <button data-v="none">None</button>
+            <button data-v="dark">Dark</button>
+            <button data-v="light">Light</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Canvas</h2>
+        <div class="seg" id="aspectSeg">
+          <button data-v="auto">Auto</button>
+          <button data-v="16:9">16:9</button>
+          <button data-v="9:16">9:16</button>
+          <button data-v="1:1">1:1</button>
+          <button data-v="4:3">4:3</button>
+        </div>
+      </section>
+
+      <section class="panel" id="zoomPanel">
+        <h2>Zoom</h2>
+        <div id="zoomEmpty" class="muted small">
+          Press <kbd>Z</kbd> or use <b>+ Zoom</b> in the timeline to add a smooth zoom at the playhead.
+        </div>
+        <div id="zoomEditor" hidden>
+          <label class="small muted">Click or drag to set the focus point</label>
+          <div class="focus-picker"><canvas id="focusCanvas" width="280" height="158"></canvas></div>
+          <div class="field">
+            <label for="zoomScale">Zoom level <output id="zoomScaleOut"></output></label>
+            <input type="range" id="zoomScale" min="1.1" max="4" step="0.05" />
+          </div>
+          <button class="btn ghost sm full" id="btnDeleteZoom">Delete zoom</button>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label for="zoomRamp">Zoom speed <output id="zoomRampOut"></output></label>
+          <input type="range" id="zoomRamp" min="0.25" max="1.5" step="0.05" />
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Export</h2>
+        <div class="field">
+          <label>Resolution</label>
+          <div class="seg" id="resSeg">
+            <button data-v="720">720p</button>
+            <button data-v="1080">1080p</button>
+            <button data-v="1440">1440p</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Frame rate</label>
+          <div class="seg" id="fpsSeg">
+            <button data-v="30">30 fps</button>
+            <button data-v="60">60 fps</button>
+          </div>
+        </div>
+        <p class="muted small" id="exportInfo"></p>
+      </section>
+    </aside>
+  </main>
+
+  <!-- Timeline -->
+  <footer class="timeline" id="timeline" hidden>
+    <div class="transport">
+      <button class="icon-btn" id="btnPlay" title="Play / Pause (Space)">
+        <svg viewBox="0 0 24 24" id="icoPlay"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/></svg>
+        <svg viewBox="0 0 24 24" id="icoPause" hidden><path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor" stroke="none"/></svg>
+      </button>
+      <span class="time" id="timeLabel">0.00 / 0.00</span>
+      <span class="muted small" id="trimLabel"></span>
+      <div class="spacer"></div>
+      <button class="btn ghost sm" id="btnAddZoom" title="Add zoom at playhead (Z)">+ Zoom</button>
+    </div>
+    <div class="tracks" id="tracks">
+      <div class="ruler" id="ruler"></div>
+      <div class="track video-track" id="videoTrack">
+        <div class="thumbs" id="thumbs"></div>
+        <div class="trim-shade left" id="shadeL"></div>
+        <div class="trim-shade right" id="shadeR"></div>
+        <div class="trim-box" id="trimBox">
+          <div class="trim-handle l" data-h="start"></div>
+          <div class="trim-handle r" data-h="end"></div>
+        </div>
+      </div>
+      <div class="track zoom-track" id="zoomTrack"></div>
+      <div class="playhead" id="playhead"><div class="playhead-knob"></div></div>
+    </div>
+  </footer>
+
+  <!-- Export modal -->
+  <div class="modal" id="exportModal" hidden>
+    <div class="modal-card">
+      <div id="exporting">
+        <h3>Exporting MP4…</h3>
+        <p class="muted small">Keep this tab open and visible. It takes about as long as the clip.</p>
+        <div class="progress"><div id="progressBar"></div></div>
+        <div class="row between">
+          <span class="muted small" id="progressText">0%</span>
+          <button class="btn ghost sm" id="btnCancelExport">Cancel</button>
+        </div>
+      </div>
+      <div id="exported" hidden>
+        <h3>Your video is ready</h3>
+        <video id="resultVideo" controls playsinline muted loop></video>
+        <p class="muted small" id="resultInfo"></p>
+        <div class="row gap end">
+          <button class="btn ghost" id="btnCloseModal">Close</button>
+          <a class="btn primary" id="btnDownload" download>Download MP4</a>
+        </div>
+      </div>
+      <div id="exportFailed" hidden>
+        <h3>Export failed</h3>
+        <p class="muted small" id="errorText"></p>
+        <div class="row end"><button class="btn ghost" id="btnCloseError">Close</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <video id="source" class="source-video" playsinline muted></video>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
