@@ -9,11 +9,12 @@ A free, open-source screen recorder that turns short clips into polished videos.
 ## Features
 
 - 🎥 **Screen recording** of a screen, window, or tab, with the cursor visible. Recording **auto-stops at 10 seconds**.
+- ⬚ **Record just part of your screen**: after choosing a screen, draw the area you want (free, 16:9, 9:16, 1:1, or 4:3). A 3-second countdown gives you time to switch windows. You can re-crop any time afterward with **Crop**.
 - 📂 **Import** any video (drag & drop works too). Longer clips get trimmed to a 10s window you can move around.
-- 🎨 **Backgrounds**: 12 gradient presets, a solid color, or your own image.
+- 🎨 **Backgrounds**: 12 gradient presets, a solid color, or your own image. Or choose **No background** to export the recording itself, edge to edge.
 - 🪟 **Frame styling**: padding, corner roundness, drop shadow, and an optional macOS-style window bar (dark or light).
 - 📐 **Aspect ratios**: Auto, 16:9, 9:16 (Reels/TikTok/Shorts), 1:1, and 4:3.
-- 🔍 **Smooth zooms**: add zoom segments on the timeline, pick the focus point, set the zoom level and speed.
+- 🔍 **Smooth zooms**: add zoom segments on the timeline, set the zoom level and speed, and drag the focus point anywhere, either in the sidebar or directly on the big preview. Turn on **Pan to a second point** and the camera glides from point A to point B while zoomed in.
 - ✂️ **Trim** with the purple handles on the timeline (0.5s to 10s).
 - 📦 **MP4 export** (H.264) at 720p, 1080p, or 1440p, 30 or 60 fps. Every frame is rendered accurately and encoded with the browser's native WebCodecs API.
 - 🔒 **Private**: no server, no account, no watermark.
@@ -26,13 +27,14 @@ A free, open-source screen recorder that turns short clips into polished videos.
 | `Z` | Add a zoom at the playhead |
 | `Delete` / `Backspace` | Delete the selected zoom |
 | `←` / `→` | Step one frame |
-| `Esc` | Deselect the zoom |
+| `Esc` | Deselect the zoom / cancel area selection |
+| `Enter` | Confirm the area selection |
 
 ## How to use
 
-1. Click **Record screen** and choose what to share. Recording stops automatically after 10 seconds, or you can click **Stop**.
-2. Pick a background and adjust the frame (padding, roundness, shadow, window style).
-3. To zoom, click on the **zoom track** (the row below the video) or press `Z`. Then click inside the small preview in the sidebar to set where it zooms. Drag the zoom block to move it, or drag its edges to resize it.
+1. Click **Record screen** and choose what to share. Draw the area you want to record (or keep **Full screen**), then click **Start recording**. After a 3-second countdown, recording starts. It stops automatically after 10 seconds, or you can click **Stop**.
+2. Pick a background and adjust the frame (padding, roundness, shadow, window style), or choose **No background**.
+3. To zoom, click on the **zoom track** (the row below the video) or press `Z`. Then drag the focus point, either in the small sidebar preview or directly on the big preview, to choose where it zooms. Turn on **Pan to a second point** to move from A to B during the zoom. Drag the zoom block to move it, or drag its edges to resize it.
 4. Click **Export MP4**. Keep the tab visible while it renders, which takes about as long as the clip. Then download your video.
 
 ## Run it locally

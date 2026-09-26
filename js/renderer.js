@@ -31,10 +31,22 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 const easeInOutCubic = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
+/** Crop rect in source pixels. */
+export function cropRect(state) {
+  const c = state.crop || { x: 0, y: 0, w: 1, h: 1 };
+  return { sx: c.x * state.srcW, sy: c.y * state.srcH, sw: c.w * state.srcW, sh: c.h * state.srcH };
+}
+
+/** Aspect ratio of the (cropped) recording. */
+export function sourceAspect(state) {
+  const { sw, sh } = cropRect(state);
+  return sw > 0 && sh > 0 ? sw / sh : 16 / 9;
+}
+
 /** Output size for a given aspect + target height (always even numbers). */
 export function outputSize(state, targetShort = 1080) {
-  const srcAspect = state.srcW && state.srcH ? state.srcW / state.srcH : 16 / 9;
-  const a = ASPECTS[state.aspect] ?? srcAspect;
+  const srcAspect = sourceAspect(state);
+  const a = state.bgMode === 'none' ? srcAspect : (ASPECTS[state.aspect] ?? srcAspect);
   let w, h;
   if (a >= 1) { h = targetShort; w = h * a; } else { w = targetShort; h = w / a; }
   const even = (n) => Math.max(2, Math.round(n / 2) * 2);
@@ -44,11 +56,15 @@ export function outputSize(state, targetShort = 1080) {
 /** Where the recording sits inside a W×H scene (before zoom). */
 export function layout(state, W, H) {
   const unit = Math.min(W, H) / 1080;
+  if (state.bgMode === 'none') {
+    const full = { x: 0, y: 0, w: W, h: H };
+    return { unit, chromeH: 0, frame: full, content: { ...full } };
+  }
   const pad = state.padding * Math.min(W, H);
   const chromeH = state.chrome !== 'none' ? Math.round(34 * unit) : 0;
   const availW = W - pad * 2;
   const availH = H - pad * 2 - chromeH;
-  const srcAspect = state.srcW / state.srcH || 16 / 9;
+  const srcAspect = sourceAspect(state);
   let cw = availW, ch = availW / srcAspect;
   if (ch > availH) { ch = availH; cw = ch * srcAspect; }
   const fx = (W - cw) / 2;
@@ -72,9 +88,27 @@ export function zoomAt(state, t) {
     if (t < z.start + ramp) p = (t - z.start) / ramp;
     else if (t > z.end - ramp) p = (z.end - t) / ramp;
     p = easeInOutCubic(clamp(p, 0, 1));
-    if (p > bestP) { bestP = p; best = z; }
+    if (p > bestP || (!best && p > 0)) { bestP = p; best = z; }
   }
   return { zoom: best, p: bestP };
+}
+
+/** Focus point (content-normalized) of a zoom at time t — pans from A to B while zoomed in. */
+export function focusAt(state, z, t) {
+  if (!z.pan) return { x: z.x, y: z.y };
+  const len = z.end - z.start;
+  const ramp = Math.min(state.zoomRamp, len / 2);
+  const hold = Math.max(1e-3, len - 2 * ramp);
+  const q = easeInOutCubic(clamp((t - z.start - ramp) / hold, 0, 1));
+  return { x: lerp(z.x, z.x2, q), y: lerp(z.y, z.y2, q) };
+}
+
+/** Camera view rect (scene space) for a zoom fully zoomed in on a given focus. */
+export function zoomRect(state, W, H, lay, scale, fx, fy) {
+  const vw = W / scale, vh = H / scale;
+  const cx = lay.content.x + fx * lay.content.w;
+  const cy = lay.content.y + fy * lay.content.h;
+  return { x: clamp(cx - vw / 2, 0, W - vw), y: clamp(cy - vh / 2, 0, H - vh), w: vw, h: vh };
 }
 
 /** Camera view rect in scene space for time t. */
@@ -82,14 +116,8 @@ export function cameraAt(state, W, H, t, lay = layout(state, W, H)) {
   const { zoom, p } = zoomAt(state, t);
   const full = { x: 0, y: 0, w: W, h: H };
   if (!zoom || p <= 0) return full;
-  const vw = W / zoom.scale, vh = H / zoom.scale;
-  const cx = lay.content.x + zoom.x * lay.content.w;
-  const cy = lay.content.y + zoom.y * lay.content.h;
-  const target = {
-    x: clamp(cx - vw / 2, 0, W - vw),
-    y: clamp(cy - vh / 2, 0, H - vh),
-    w: vw, h: vh,
-  };
+  const f = focusAt(state, zoom, t);
+  const target = zoomRect(state, W, H, lay, zoom.scale, f.x, f.y);
   return {
     x: lerp(full.x, target.x, p), y: lerp(full.y, target.y, p),
     w: lerp(full.w, target.w, p), h: lerp(full.h, target.h, p),
@@ -156,9 +184,11 @@ function drawChrome(ctx, state, lay) {
  * @param {number} t      source time (s) — used for zoom animation
  * @param {CanvasImageSource} source  the video element / frame
  */
-export function renderScene(ctx, state, W, H, t, source) {
+export function renderScene(ctx, state, W, H, t, source, opts = {}) {
   const lay = layout(state, W, H);
-  const cam = cameraAt(state, W, H, t, lay);
+  const cam = opts.noZoom ? { x: 0, y: 0, w: W, h: H } : cameraAt(state, W, H, t, lay);
+  const hasSource = source && (source.videoWidth || source.width);
+  const { sx, sy, sw, sh } = cropRect(state);
 
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -169,6 +199,15 @@ export function renderScene(ctx, state, W, H, t, source) {
   // Camera (zoom) transform
   ctx.scale(W / cam.w, H / cam.h);
   ctx.translate(-cam.x, -cam.y);
+
+  if (state.bgMode === 'none') {
+    // The recording itself, edge to edge.
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    if (hasSource) ctx.drawImage(source, sx, sy, sw, sh, 0, 0, W, H);
+    ctx.restore();
+    return;
+  }
 
   drawBackground(ctx, state, W, H);
 
@@ -194,9 +233,7 @@ export function renderScene(ctx, state, W, H, t, source) {
   ctx.fillStyle = '#000';
   ctx.fillRect(frame.x, frame.y, frame.w, frame.h);
   if (state.chrome !== 'none') drawChrome(ctx, state, lay);
-  if (source && (source.videoWidth || source.width)) {
-    ctx.drawImage(source, content.x, content.y, content.w, content.h);
-  }
+  if (hasSource) ctx.drawImage(source, sx, sy, sw, sh, content.x, content.y, content.w, content.h);
   ctx.restore();
 
   // Subtle inner border for crispness

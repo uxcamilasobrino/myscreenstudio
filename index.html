@@ -67,12 +67,71 @@
       </div>
 
       <div class="drop-overlay" id="dropOverlay" hidden><span>Drop your video</span></div>
+
+      <!-- Area selection (before recording, or to re-crop afterwards) -->
+      <div class="crop-overlay" id="cropOverlay" hidden>
+        <div class="crop-head">
+          <div>
+            <h3 id="cropTitle">Select the area to record</h3>
+            <p class="muted small" id="cropHint">Drag to draw a new area. Drag inside it to move it, or use the corners to resize it.</p>
+          </div>
+          <div class="seg" id="cropAspectSeg">
+            <button data-v="free">Free</button>
+            <button data-v="16:9">16:9</button>
+            <button data-v="9:16">9:16</button>
+            <button data-v="1:1">1:1</button>
+            <button data-v="4:3">4:3</button>
+          </div>
+        </div>
+        <div class="crop-stage" id="cropStage">
+          <div class="crop-media" id="cropMedia">
+            <canvas id="cropCanvas"></canvas>
+            <div class="crop-box" id="cropBox">
+              <span class="crop-size" id="cropSize"></span>
+              <i class="ch nw" data-h="nw"></i><i class="ch ne" data-h="ne"></i>
+              <i class="ch sw" data-h="sw"></i><i class="ch se" data-h="se"></i>
+              <i class="ch n" data-h="n"></i><i class="ch s" data-h="s"></i>
+              <i class="ch w" data-h="w"></i><i class="ch e" data-h="e"></i>
+            </div>
+          </div>
+        </div>
+        <div class="crop-foot">
+          <button class="btn ghost" id="btnCropCancel">Cancel</button>
+          <div class="spacer"></div>
+          <button class="btn ghost" id="btnCropFull">Full screen</button>
+          <button class="btn primary" id="btnCropConfirm">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor"/></svg>
+            <span id="cropConfirmLabel">Start recording</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="countdown" id="countdown" hidden>
+        <div class="countdown-num" id="countdownNum">3</div>
+        <p>Switch to what you want to record. Recording starts automatically.</p>
+      </div>
     </section>
 
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar" aria-label="Settings">
       <section class="panel">
+        <h2>Recording area</h2>
+        <div class="row between gap">
+          <span class="small" id="cropInfo">Full screen</span>
+          <button class="btn ghost sm" id="btnEditCrop">
+            <svg viewBox="0 0 24 24"><path d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2"/></svg>
+            Crop
+          </button>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>Background</h2>
+        <div class="seg" id="bgModeSeg" style="margin-bottom:12px">
+          <button data-v="background">Background</button>
+          <button data-v="none">No background</button>
+        </div>
+        <div id="bgOptions">
         <div class="swatches" id="gradientSwatches"></div>
         <div class="row gap">
           <label class="swatch-btn" title="Solid color">
@@ -85,9 +144,11 @@
             <span>Image</span>
           </label>
         </div>
+        </div>
+        <p class="muted small" id="bgNoneHint" hidden>Exports the recording itself, edge to edge. Zooms still work.</p>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="framePanel">
         <h2>Frame</h2>
         <div class="field">
           <label for="padding">Padding <output id="paddingOut"></output></label>
@@ -111,7 +172,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="canvasPanel">
         <h2>Canvas</h2>
         <div class="seg" id="aspectSeg">
           <button data-v="auto">Auto</button>
@@ -128,8 +189,13 @@
           Press <kbd>Z</kbd> or use <b>+ Zoom</b> in the timeline to add a smooth zoom at the playhead.
         </div>
         <div id="zoomEditor" hidden>
-          <label class="small muted">Click or drag to set the focus point</label>
+          <label class="small muted">Drag the point here, or drag directly on the big preview, to move the focus anywhere on the screen.</label>
           <div class="focus-picker"><canvas id="focusCanvas" width="280" height="158"></canvas></div>
+          <label class="toggle">
+            <input type="checkbox" id="zoomPan" />
+            <span class="toggle-ui"></span>
+            <span>Pan to a second point <span class="muted">(A → B)</span></span>
+          </label>
           <div class="field">
             <label for="zoomScale">Zoom level <output id="zoomScaleOut"></output></label>
             <input type="range" id="zoomScale" min="1.1" max="4" step="0.05" />

@@ -1,4 +1,4 @@
-import { GRADIENTS, renderScene, outputSize, layout } from './renderer.js';
+import { GRADIENTS, renderScene, outputSize, layout, cropRect, sourceAspect, zoomRect } from './renderer.js';
 import { exportMp4, canExportMp4 } from './exporter.js';
 
 const MAX_SECONDS = 10;
@@ -17,6 +17,8 @@ const state = {
   radius: 14,
   shadow: 0.6,
   chrome: 'none',
+  bgMode: 'background', // 'background' | 'none' (the recording itself)
+  crop: { x: 0, y: 0, w: 1, h: 1 }, // normalized area of the recording to use
   aspect: '16:9',
   zooms: [],          // { id, start, end, scale, x, y }
   zoomRamp: 0.7,
@@ -75,7 +77,7 @@ async function prepareVideo(v, url, knownDuration) {
 /* ------------------------------------------------------------------ */
 /* Loading a clip                                                      */
 /* ------------------------------------------------------------------ */
-async function loadClip(blob, knownDuration) {
+async function loadClip(blob, knownDuration, crop) {
   if (sourceUrl) URL.revokeObjectURL(sourceUrl);
   sourceUrl = URL.createObjectURL(blob);
   video.pause();
@@ -87,9 +89,11 @@ async function loadClip(blob, knownDuration) {
   state.srcW = video.videoWidth || 1920;
   state.srcH = video.videoHeight || 1080;
   state.trim = { start: 0, end: Math.min(duration, MAX_SECONDS) };
+  state.crop = crop ? { ...crop } : { x: 0, y: 0, w: 1, h: 1 };
   state.zooms = [];
   selectedZoomId = null;
   loaded = true;
+  updateCropInfo();
 
   if (duration > MAX_SECONDS + 0.01) {
     toast(`Clip is ${duration.toFixed(1)}s — trimmed to the first ${MAX_SECONDS}s. Drag the purple handles to pick a different part.`, 5000);
@@ -139,8 +143,11 @@ async function makeThumbnails(url, duration) {
 /* Recording                                                           */
 /* ------------------------------------------------------------------ */
 let recorder = null, recTimer = 0, recStream = null;
+const liveVideo = document.createElement('video');
+liveVideo.muted = true; liveVideo.playsInline = true;
 
 async function startRecording() {
+  if (recorder || recStream) return;
   if (!navigator.mediaDevices?.getDisplayMedia) {
     toast('Screen recording is not supported in this browser. Try Chrome, Edge or Firefox on desktop.');
     return;
@@ -153,29 +160,76 @@ async function startRecording() {
       surfaceSwitching: 'include',
     });
   } catch (e) {
+    recStream = null;
     if (e.name !== 'NotAllowedError') toast('Could not start recording: ' + e.message);
     return;
   }
+  video.pause();
+  recStream.getVideoTracks()[0].addEventListener('ended', () => {
+    if (recorder) stopRecording();
+    else { closeCrop(); cancelRecording(); }
+  });
+  liveVideo.srcObject = recStream;
+  await liveVideo.play().catch(() => {});
+  if (!liveVideo.videoWidth) await once(liveVideo, 'loadedmetadata');
 
+  // Let the user choose the part of the screen to record.
+  openCrop({
+    mode: 'record',
+    source: liveVideo,
+    initial: FULL_CROP,
+    onConfirm: async (crop) => {
+      await countdown(3);
+      if (recStream) beginRecording(crop);
+    },
+    onCancel: cancelRecording,
+  });
+}
+
+function cancelRecording() {
+  recStream?.getTracks().forEach((t) => t.stop());
+  recStream = null;
+  liveVideo.srcObject = null;
+}
+
+function countdown(n) {
+  return new Promise((resolve) => {
+    const el = $('countdown');
+    el.hidden = false;
+    let i = n;
+    const step = () => {
+      if (i === 0 || !recStream) { el.hidden = true; resolve(); return; }
+      $('countdownNum').textContent = i;
+      document.title = `Recording in ${i}… — MyScreenStudio`;
+      i--;
+      setTimeout(step, 1000);
+    };
+    step();
+  });
+}
+
+function beginRecording(crop) {
   const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
   const mimeType = types.find((t) => window.MediaRecorder?.isTypeSupported(t)) || '';
   const chunks = [];
-  recorder = new MediaRecorder(recStream, { mimeType, videoBitsPerSecond: 25_000_000 });
+  const stream = recStream;
+  recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 25_000_000 });
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
 
   const t0 = performance.now();
   let elapsed = 0;
   recorder.onstop = async () => {
     clearInterval(recTimer);
-    recStream.getTracks().forEach((t) => t.stop());
+    stream.getTracks().forEach((t) => t.stop());
+    recStream = null;
+    liveVideo.srcObject = null;
     $('recPill').hidden = true;
     document.title = 'MyScreenStudio';
     $('emptyState').style.opacity = '';
     const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
     recorder = null;
-    if (blob.size) await loadClip(blob, elapsed);
+    if (blob.size) await loadClip(blob, elapsed, crop);
   };
-  recStream.getVideoTracks()[0].addEventListener('ended', stopRecording);
 
   recorder.start(250);
   $('recPill').hidden = false;
@@ -184,13 +238,218 @@ async function startRecording() {
     elapsed = (performance.now() - t0) / 1000;
     $('recTime').textContent = `${Math.min(elapsed, MAX_SECONDS).toFixed(1)}s`;
     $('recBar').style.width = `${Math.min(100, (elapsed / MAX_SECONDS) * 100)}%`;
-    document.title = `● ${Math.ceil(MAX_SECONDS - elapsed)}s left — MyScreenStudio`;
+    document.title = `● ${Math.max(0, Math.ceil(MAX_SECONDS - elapsed))}s left — MyScreenStudio`;
     if (elapsed >= MAX_SECONDS) stopRecording();
   }, 50);
 }
 
 function stopRecording() {
   if (recorder && recorder.state !== 'inactive') recorder.stop();
+}
+
+/* ------------------------------------------------------------------ */
+/* Area selection (crop)                                               */
+/* ------------------------------------------------------------------ */
+const FULL_CROP = { x: 0, y: 0, w: 1, h: 1 };
+const CROP_ASPECTS = { free: null, '16:9': 16 / 9, '9:16': 9 / 16, '1:1': 1, '4:3': 4 / 3 };
+const cropCanvas = $('cropCanvas');
+const cctx = cropCanvas.getContext('2d');
+let crop = null; // { mode, source, sel, aspect, onConfirm, onCancel }
+
+function openCrop({ mode, source, initial, onConfirm, onCancel }) {
+  crop = { mode, source, sel: { ...initial }, aspect: 'free', onConfirm, onCancel };
+  $('cropTitle').textContent = mode === 'record' ? 'Select the area to record' : 'Crop the recording';
+  $('cropConfirmLabel').textContent = mode === 'record' ? 'Start recording' : 'Apply crop';
+  $('btnCropConfirm').querySelector('svg').style.display = mode === 'record' ? '' : 'none';
+  $('btnCropFull').textContent = mode === 'record' ? 'Full screen' : 'Reset';
+  $('cropOverlay').hidden = false;
+  syncCropAspectSeg();
+  layoutCrop();
+}
+
+function closeCrop() {
+  $('cropOverlay').hidden = true;
+  crop = null;
+}
+
+function cropSrcSize() {
+  const s = crop.source;
+  return { w: s.videoWidth || 1920, h: s.videoHeight || 1080 };
+}
+
+function layoutCrop() {
+  if (!crop) return;
+  const { w, h } = cropSrcSize();
+  const stage = $('cropStage');
+  const maxW = stage.clientWidth, maxH = stage.clientHeight;
+  const s = Math.min(maxW / w, maxH / h);
+  const cw = Math.max(50, Math.floor(w * s)), ch = Math.max(50, Math.floor(h * s));
+  const dpr = window.devicePixelRatio || 1;
+  cropCanvas.style.width = cw + 'px';
+  cropCanvas.style.height = ch + 'px';
+  cropCanvas.width = Math.round(cw * dpr);
+  cropCanvas.height = Math.round(ch * dpr);
+  positionCropBox();
+}
+
+function positionCropBox() {
+  const { sel } = crop;
+  const b = $('cropBox');
+  const W = cropCanvas.clientWidth, H = cropCanvas.clientHeight;
+  b.style.left = sel.x * W + 'px';
+  b.style.top = sel.y * H + 'px';
+  b.style.width = sel.w * W + 'px';
+  b.style.height = sel.h * H + 'px';
+  const { w, h } = cropSrcSize();
+  $('cropSize').textContent = `${Math.round(sel.w * w)} × ${Math.round(sel.h * h)}`;
+}
+
+function drawCrop() {
+  if (!crop) return;
+  const s = crop.source;
+  if (s.videoWidth) cctx.drawImage(s, 0, 0, cropCanvas.width, cropCanvas.height);
+}
+
+function syncCropAspectSeg() {
+  $('cropAspectSeg').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.v === crop.aspect));
+}
+
+/** k = normalized height per normalized width for the locked aspect (null if free). */
+function cropK() {
+  const a = CROP_ASPECTS[crop.aspect];
+  if (!a) return null;
+  const { w, h } = cropSrcSize();
+  return w / (h * a);
+}
+
+function minCropN() {
+  const { w, h } = cropSrcSize();
+  return { w: Math.min(1, 64 / w), h: Math.min(1, 64 / h) };
+}
+
+/** Rect from a fixed anchor to a pointer, honoring aspect lock and screen bounds. */
+function rectFromAnchor(ax, ay, px, py) {
+  const k = cropK();
+  const dx = px >= ax ? 1 : -1, dy = py >= ay ? 1 : -1;
+  const maxW = dx > 0 ? 1 - ax : ax, maxH = dy > 0 ? 1 - ay : ay;
+  const mn = minCropN();
+  let w = clamp(Math.abs(px - ax), mn.w, maxW);
+  let h = clamp(Math.abs(py - ay), mn.h, maxH);
+  if (k) {
+    w = Math.max(w, h / k);
+    h = w * k;
+    if (w > maxW) { w = maxW; h = w * k; }
+    if (h > maxH) { h = maxH; w = h / k; }
+  }
+  return { x: dx > 0 ? ax : ax - w, y: dy > 0 ? ay : ay - h, w, h };
+}
+
+function setCropAspect(v) {
+  crop.aspect = v;
+  syncCropAspectSeg();
+  const k = cropK();
+  if (!k) return;
+  const { sel } = crop;
+  const cx = sel.x + sel.w / 2, cy = sel.y + sel.h / 2;
+  // largest rect of that aspect that fits the screen, at 80%, centered on the current selection
+  let w = 1, h = k;
+  if (h > 1) { h = 1; w = 1 / k; }
+  w *= 0.8; h *= 0.8;
+  crop.sel = { x: clamp(cx - w / 2, 0, 1 - w), y: clamp(cy - h / 2, 0, 1 - h), w, h };
+  positionCropBox();
+}
+
+$('cropMedia').addEventListener('pointerdown', (e) => {
+  if (!crop) return;
+  e.preventDefault();
+  const r = cropCanvas.getBoundingClientRect();
+  const P = (ev) => ({ x: clamp((ev.clientX - r.left) / r.width, 0, 1), y: clamp((ev.clientY - r.top) / r.height, 0, 1) });
+  const p0 = P(e);
+  const s0 = { ...crop.sel };
+  const handle = e.target.dataset.h;
+  const inBox = e.target.closest('#cropBox');
+  const k = cropK();
+
+  let onMove;
+  if (handle) {
+    const x2 = s0.x + s0.w, y2 = s0.y + s0.h;
+    if (handle.length === 2) {
+      // corner: anchor is the opposite corner
+      const ax = handle.includes('w') ? x2 : s0.x;
+      const ay = handle.includes('n') ? y2 : s0.y;
+      onMove = (p) => (crop.sel = rectFromAnchor(ax, ay, p.x, p.y));
+    } else {
+      const mn = minCropN();
+      onMove = (p) => {
+        let { x, y, w, h } = s0;
+        if (handle === 'e') w = clamp(p.x - x, mn.w, 1 - x);
+        if (handle === 'w') { const nx = clamp(p.x, 0, x2 - mn.w); w = x2 - nx; x = nx; }
+        if (handle === 's') h = clamp(p.y - y, mn.h, 1 - y);
+        if (handle === 'n') { const ny = clamp(p.y, 0, y2 - mn.h); h = y2 - ny; y = ny; }
+        if (k) {
+          const cx = s0.x + s0.w / 2, cy = s0.y + s0.h / 2;
+          if (handle === 'e' || handle === 'w') { h = w * k; if (h > 1) { h = 1; w = h / k; } y = clamp(cy - h / 2, 0, 1 - h); }
+          else { w = h / k; if (w > 1) { w = 1; h = w * k; } x = clamp(cx - w / 2, 0, 1 - w); }
+          if (handle === 'w') x = x2 - w;
+          if (handle === 'n') y = y2 - h;
+        }
+        crop.sel = { x, y, w, h };
+      };
+    }
+  } else if (inBox) {
+    onMove = (p) => {
+      crop.sel = { ...s0, x: clamp(s0.x + p.x - p0.x, 0, 1 - s0.w), y: clamp(s0.y + p.y - p0.y, 0, 1 - s0.h) };
+    };
+  } else {
+    // draw a new selection
+    onMove = (p) => { crop.sel = rectFromAnchor(p0.x, p0.y, p.x, p.y); };
+  }
+  drag(e, (ev) => { if (!crop) return; onMove(P(ev)); positionCropBox(); });
+});
+
+$('cropAspectSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b && crop) setCropAspect(b.dataset.v);
+});
+$('btnCropFull').addEventListener('click', () => {
+  if (!crop) return;
+  crop.aspect = 'free';
+  syncCropAspectSeg();
+  crop.sel = { ...FULL_CROP };
+  positionCropBox();
+});
+$('btnCropCancel').addEventListener('click', () => { const c = crop; closeCrop(); c?.onCancel?.(); });
+$('btnCropConfirm').addEventListener('click', () => {
+  const c = crop;
+  if (!c) return;
+  const { sel } = c;
+  const isFull = sel.w > 0.995 && sel.h > 0.995;
+  closeCrop();
+  c.onConfirm(isFull ? { ...FULL_CROP } : { ...sel });
+});
+new ResizeObserver(() => crop && layoutCrop()).observe($('cropStage'));
+
+function editCrop() {
+  if (!loaded) return;
+  video.pause();
+  openCrop({
+    mode: 'edit',
+    source: video,
+    initial: state.crop,
+    onConfirm: (c) => {
+      state.crop = c;
+      updateCropInfo();
+      resizePreview();
+      updateExportInfo();
+      if (selectedZoomId) renderZoomPanel();
+    },
+  });
+}
+
+function updateCropInfo() {
+  const c = state.crop;
+  const full = c.w > 0.995 && c.h > 0.995;
+  $('cropInfo').textContent = full ? 'Full screen' : `${Math.round(c.w * state.srcW)} × ${Math.round(c.h * state.srcH)} area`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -212,10 +471,17 @@ function loop() {
     if (!video.paused && video.currentTime >= state.trim.end) {
       video.currentTime = state.trim.start;
     }
-    renderScene(pctx, state, preview.width, preview.height, video.currentTime, video);
+    const z = focusDrag && selectedZoom();
+    renderScene(pctx, state, preview.width, preview.height, video.currentTime, video, { noZoom: !!z });
+    if (z) {
+      const lay = layout(state, preview.width, preview.height);
+      const c = lay.content;
+      drawFocusOverlay(pctx, z, c.x, c.y, c.w, c.h, Math.max(1, preview.width / 1000));
+    }
     updatePlayhead();
     if (selectedZoomId) drawFocusPicker();
   }
+  if (crop) drawCrop();
   requestAnimationFrame(loop);
 }
 
@@ -378,6 +644,7 @@ function addZoom(at = video.currentTime) {
     start, end,
     scale: prev ? prev.scale : 2,
     x: 0.5, y: 0.5,
+    pan: false, x2: null, y2: null,
   };
   state.zooms.push(z);
   selectZoom(z.id);
@@ -402,65 +669,163 @@ function deleteZoom() {
 /* ------------------------------------------------------------------ */
 const focusCanvas = $('focusCanvas');
 const fctx = focusCanvas.getContext('2d');
+let focusDrag = null; // { which: 'a' | 'b' } while dragging on the big preview
 
 function renderZoomPanel() {
   const z = selectedZoom();
   $('zoomEmpty').hidden = !!z;
   $('zoomEditor').hidden = !z;
+  preview.classList.toggle('focus-editable', !!z);
   if (!z) return;
-  const aspect = state.srcW / state.srcH || 16 / 9;
+  const aspect = sourceAspect(state);
   focusCanvas.width = 560;
   focusCanvas.height = Math.round(560 / aspect);
   setRange('zoomScale', z.scale, (v) => `${(+v).toFixed(1)}×`);
+  $('zoomPan').checked = !!z.pan;
   drawFocusPicker();
+}
+
+/** Zoom viewport (for focus a or b) in content-normalized coords. */
+function viewportNorm(z, which) {
+  const out = outputSize(state, 1080);
+  const lay = layout(state, out.w, out.h);
+  const fx = which === 'b' ? z.x2 : z.x, fy = which === 'b' ? z.y2 : z.y;
+  const r = zoomRect(state, out.w, out.h, lay, z.scale, fx, fy);
+  return {
+    x: (r.x - lay.content.x) / lay.content.w, y: (r.y - lay.content.y) / lay.content.h,
+    w: r.w / lay.content.w, h: r.h / lay.content.h,
+  };
+}
+
+/** Draw zoom viewports + A/B handles over an area (x0,y0,W,H) that shows the recording. */
+function drawFocusOverlay(ctx, z, x0, y0, W, H, scale = 1) {
+  const views = [viewportNorm(z, 'a')];
+  if (z.pan) views.push(viewportNorm(z, 'b'));
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0, y0, W, H);
+  // dim everything outside the zoomed-in area(s)
+  for (const v of views) ctx.rect(x0 + v.x * W, y0 + v.y * H, v.w * W, v.h * H);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fill('evenodd');
+  ctx.lineWidth = 2.5 * scale;
+  views.forEach((v, i) => {
+    ctx.setLineDash(i === 1 ? [8 * scale, 6 * scale] : []);
+    ctx.strokeStyle = '#f5a524';
+    ctx.strokeRect(x0 + v.x * W, y0 + v.y * H, v.w * W, v.h * H);
+  });
+  ctx.setLineDash([]);
+  const pts = [{ x: z.x, y: z.y, l: 'A' }];
+  if (z.pan) pts.push({ x: z.x2, y: z.y2, l: 'B' });
+  if (z.pan) {
+    ctx.beginPath();
+    ctx.moveTo(x0 + z.x * W, y0 + z.y * H);
+    ctx.lineTo(x0 + z.x2 * W, y0 + z.y2 * H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 2 * scale;
+    ctx.stroke();
+  }
+  for (const p of pts) {
+    const px = x0 + p.x * W, py = y0 + p.y * H, r = 11 * scale;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.lineWidth = 3 * scale;
+    ctx.strokeStyle = '#f5a524';
+    ctx.stroke();
+    if (z.pan) {
+      ctx.fillStyle = '#111';
+      ctx.font = `700 ${11 * scale}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(p.l, px, py + 0.5 * scale);
+    }
+  }
+  ctx.restore();
 }
 
 function drawFocusPicker() {
   const z = selectedZoom();
   if (!z) return;
   const W = focusCanvas.width, H = focusCanvas.height;
-  fctx.drawImage(video, 0, 0, W, H);
+  const { sx, sy, sw, sh } = cropRect(state);
+  fctx.fillStyle = '#000';
+  fctx.fillRect(0, 0, W, H);
+  if (video.videoWidth) fctx.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
+  drawFocusOverlay(fctx, z, 0, 0, W, H, 2);
+}
 
-  // Visible region at full zoom, expressed in video (content) coordinates
-  const out = outputSize(state, 1080);
-  const lay = layout(state, out.w, out.h);
-  const vw = out.w / z.scale, vh = out.h / z.scale;
-  const cx = lay.content.x + z.x * lay.content.w, cy = lay.content.y + z.y * lay.content.h;
-  const rx = clamp(cx - vw / 2, 0, out.w - vw), ry = clamp(cy - vh / 2, 0, out.h - vh);
-  const x0 = ((rx - lay.content.x) / lay.content.w) * W;
-  const y0 = ((ry - lay.content.y) / lay.content.h) * H;
-  const w0 = (vw / lay.content.w) * W, h0 = (vh / lay.content.h) * H;
+/** Pick which focus handle (a/b) is nearest to a content-normalized point. */
+function nearestHandle(z, x, y, aspect) {
+  if (!z.pan) return 'a';
+  const d = (px, py) => Math.hypot((px - x) * aspect, py - y);
+  return d(z.x, z.y) <= d(z.x2, z.y2) ? 'a' : 'b';
+}
 
-  fctx.save();
-  fctx.fillStyle = 'rgba(0,0,0,0.55)';
-  fctx.beginPath();
-  fctx.rect(0, 0, W, H);
-  fctx.rect(x0, y0, w0, h0);
-  fctx.fill('evenodd');
-  fctx.strokeStyle = '#f5a524';
-  fctx.lineWidth = 3;
-  fctx.strokeRect(x0, y0, w0, h0);
-  fctx.beginPath();
-  fctx.arc(z.x * W, z.y * H, 9, 0, Math.PI * 2);
-  fctx.fillStyle = '#fff';
-  fctx.fill();
-  fctx.lineWidth = 3;
-  fctx.stroke();
-  fctx.restore();
+function setFocus(z, which, x, y) {
+  x = clamp(x, 0, 1); y = clamp(y, 0, 1);
+  if (which === 'b') { z.x2 = x; z.y2 = y; } else { z.x = x; z.y = y; }
+}
+
+/** Show the result of a focus point: jump to where that point is fully zoomed in. */
+function seekToFocus(z, which) {
+  const ramp = Math.min(state.zoomRamp, (z.end - z.start) / 2);
+  seek(which === 'b' ? z.end - ramp - 0.01 : z.start + ramp + 0.01);
 }
 
 focusCanvas.addEventListener('pointerdown', (e) => {
-  const set = (ev) => {
-    const z = selectedZoom();
-    if (!z) return;
-    const r = focusCanvas.getBoundingClientRect();
-    z.x = clamp((ev.clientX - r.left) / r.width, 0, 1);
-    z.y = clamp((ev.clientY - r.top) / r.height, 0, 1);
-    // jump the playhead inside the zoom so you can see the result
-    if (video.currentTime < z.start || video.currentTime > z.end) seek((z.start + z.end) / 2);
+  const z = selectedZoom();
+  if (!z) return;
+  video.pause();
+  const r = focusCanvas.getBoundingClientRect();
+  const P = (ev) => ({ x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height });
+  const p = P(e);
+  const which = nearestHandle(z, p.x, p.y, r.width / r.height);
+  setFocus(z, which, p.x, p.y);
+  seekToFocus(z, which);
+  drag(e, (ev) => { const q = P(ev); setFocus(z, which, q.x, q.y); seekToFocus(z, which); });
+});
+
+// Drag the focus directly on the big preview (shows the full, un-zoomed view while dragging).
+preview.addEventListener('pointerdown', (e) => {
+  const z = selectedZoom();
+  if (!z || exportAbort) return;
+  video.pause();
+  const toContent = (ev) => {
+    const r = preview.getBoundingClientRect();
+    const px = ((ev.clientX - r.left) / r.width) * preview.width;
+    const py = ((ev.clientY - r.top) / r.height) * preview.height;
+    const lay = layout(state, preview.width, preview.height);
+    return { x: (px - lay.content.x) / lay.content.w, y: (py - lay.content.y) / lay.content.h };
   };
-  set(e);
-  drag(e, set);
+  const p = toContent(e);
+  const which = nearestHandle(z, p.x, p.y, sourceAspect(state));
+  focusDrag = { which };
+  preview.classList.add('focus-dragging');
+  setFocus(z, which, p.x, p.y);
+  drag(e, (ev) => { const q = toContent(ev); setFocus(z, which, q.x, q.y); }, () => {
+    focusDrag = null;
+    preview.classList.remove('focus-dragging');
+    seekToFocus(z, which);
+  });
+});
+
+$('zoomPan').addEventListener('change', (e) => {
+  const z = selectedZoom();
+  if (!z) return;
+  z.pan = e.target.checked;
+  if (z.pan && z.x2 == null) {
+    z.x2 = clamp(z.x + (z.x < 0.6 ? 0.3 : -0.3), 0, 1);
+    z.y2 = z.y;
+  }
+  if (z.pan && z.end - z.start < 1.5) {
+    // give panning some room
+    const { nextStart } = neighbors(z);
+    z.end = Math.min(nextStart, z.start + 2.5);
+  }
+  renderTimeline();
+  seekToFocus(z, z.pan ? 'b' : 'a');
 });
 
 /* ------------------------------------------------------------------ */
@@ -538,9 +903,21 @@ function initSidebar() {
   });
 
   bindSeg('chromeSeg', () => state.chrome, (v) => { state.chrome = v; });
+  bindSeg('bgModeSeg', () => state.bgMode, (v) => { state.bgMode = v; syncBgMode(); });
+  syncBgMode();
   bindSeg('aspectSeg', () => state.aspect, (v) => { state.aspect = v; resizePreview(); updateExportInfo(); if (selectedZoomId) renderZoomPanel(); });
   bindSeg('resSeg', () => state.resolution, (v) => { state.resolution = +v; updateExportInfo(); });
   bindSeg('fpsSeg', () => state.fps, (v) => { state.fps = +v; updateExportInfo(); });
+}
+
+function syncBgMode() {
+  const none = state.bgMode === 'none';
+  $('bgOptions').hidden = none;
+  $('bgNoneHint').hidden = !none;
+  $('framePanel').hidden = none;
+  $('canvasPanel').hidden = none;
+  if (loaded) { resizePreview(); if (selectedZoomId) renderZoomPanel(); }
+  updateExportInfo();
 }
 
 function updateExportInfo() {
@@ -638,6 +1015,7 @@ window.addEventListener('drop', (e) => {
 $('btnRecord').addEventListener('click', startRecording);
 $('btnNew').addEventListener('click', startRecording);
 $('btnStop').addEventListener('click', stopRecording);
+$('btnEditCrop').addEventListener('click', editCrop);
 $('btnPlay').addEventListener('click', togglePlay);
 $('btnAddZoom').addEventListener('click', () => addZoom());
 $('btnDeleteZoom').addEventListener('click', deleteZoom);
@@ -648,6 +1026,7 @@ $('btnCloseError').addEventListener('click', closeModal);
 
 window.addEventListener('keydown', (e) => {
   if (e.target.matches('input, textarea') && e.target.type !== 'range') return;
+  if (crop) { if (e.key === 'Escape') $('btnCropCancel').click(); else if (e.key === 'Enter') $('btnCropConfirm').click(); return; }
   if (!$('exportModal').hidden) { if (e.key === 'Escape' && !exportAbort) closeModal(); return; }
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   else if (e.key === 'z' || e.key === 'Z') addZoom();
